@@ -1,0 +1,11 @@
+# Dados sensíveis do e-SUS (proteção de privacidade e LGPD)
+*.csv
+*.tsv
+*.xlsx
+
+# Logs e arquivos de sistema
+*.log
+node_modules/
+.DS_Store
+Thumbs.db
+generate_sample.py
