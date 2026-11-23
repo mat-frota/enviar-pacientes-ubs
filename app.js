@@ -1,18 +1,18 @@
 /**
  * UBS Suzyanne Sousa Lopes - Olho d'Água das Cunhãs - MA
- * Sistema de Agendamento e Envio de Avisos para WhatsApp
+ * Sistema de Agendamento e Notificação via WhatsApp
  */
 
 (function () {
   'use strict';
 
   const STORAGE_KEYS = {
-    ACS_LIST: 'ubs_clean_acs_list_v2',
-    SELECTED_ACS_ID: 'ubs_clean_selected_acs_v2',
-    PATIENTS_DB: 'ubs_clean_patients_db_v2'
+    AUTH_OK: 'ubs_auth_active_v3',
+    SELECTED_ACS_ID: 'ubs_selected_acs_v3',
+    PATIENTS_DB: 'ubs_patients_db_central_v3'
   };
 
-  const CSV_UPLOAD_PASSWORD = '12345';
+  const GLOBAL_PASSWORD = '12345';
 
   const DEFAULT_ACS = [
     { id: 'acs_1', name: 'Mateus Frota Mesquita', microarea: '13' },
@@ -28,12 +28,13 @@
   const state = {
     acsList: [...DEFAULT_ACS],
     currentAcsId: 'acs_1',
-    patients: [],
+    allPatientsDb: {},
+    currentPatients: [],
     selectedPatient: null,
     currentService: 'Dentista',
     currentDate: '',
     currentShift: 'Manhã',
-    stagedCsvPatients: []
+    adminStagedPatients: []
   };
 
   // Utilitários de Formatação
@@ -90,49 +91,167 @@
       t.style.opacity = '0';
       t.style.transition = 'opacity 0.3s ease';
       setTimeout(() => t.remove(), 300);
-    }, 3000);
+    }, 3200);
   }
 
-  // Banco de Dados Local
-  function getDb() {
+  // ==========================================
+  // 1. AUTENTICAÇÃO POR SENHA (LOGIN GERAL)
+  // ==========================================
+  function checkAuth() {
+    const isAuth = sessionStorage.getItem(STORAGE_KEYS.AUTH_OK) === 'true';
+    const screenLogin = document.getElementById('screenLogin');
+    const screenApp = document.getElementById('screenApp');
+
+    if (isAuth) {
+      screenLogin.style.display = 'none';
+      screenApp.style.display = 'flex';
+      initApp();
+    } else {
+      screenLogin.style.display = 'flex';
+      screenApp.style.display = 'none';
+      setupLoginForm();
+    }
+  }
+
+  function setupLoginForm() {
+    const form = document.getElementById('formLogin');
+    const inputPass = document.getElementById('inputAccessPassword');
+    const errorMsg = document.getElementById('loginErrorMsg');
+
+    form.onsubmit = function (e) {
+      e.preventDefault();
+      const entered = inputPass.value.trim();
+
+      if (entered === GLOBAL_PASSWORD) {
+        sessionStorage.setItem(STORAGE_KEYS.AUTH_OK, 'true');
+        errorMsg.style.display = 'none';
+        document.getElementById('screenLogin').style.display = 'none';
+        document.getElementById('screenApp').style.display = 'flex';
+        initApp();
+        showToast('Acesso liberado! Bem-vindo.', 'success');
+      } else {
+        errorMsg.style.display = 'block';
+        inputPass.value = '';
+        inputPass.focus();
+      }
+    };
+  }
+
+  function setupLogout() {
+    const btnLogout = document.getElementById('btnLogout');
+    if (btnLogout) {
+      btnLogout.addEventListener('click', () => {
+        sessionStorage.removeItem(STORAGE_KEYS.AUTH_OK);
+        location.reload();
+      });
+    }
+  }
+
+  // ==========================================
+  // 2. BASE DE DADOS CENTRALIZADA
+  // ==========================================
+  async function loadCentralDatabase() {
+    // 1. Tentar carregar o arquivo central dados-pacientes.json (que vem do servidor ou GitHub)
     try {
-      const raw = localStorage.getItem(STORAGE_KEYS.PATIENTS_DB);
-      return raw ? JSON.parse(raw) : {};
+      const resp = await fetch('dados-pacientes.json?t=' + Date.now());
+      if (resp.ok) {
+        const json = await resp.json();
+        if (json && typeof json === 'object') {
+          state.allPatientsDb = json;
+          if (Array.isArray(json._acs_list) && json._acs_list.length > 0) {
+            state.acsList = json._acs_list;
+            localStorage.setItem('ubs_acs_list_custom', JSON.stringify(state.acsList));
+          }
+          localStorage.setItem(STORAGE_KEYS.PATIENTS_DB, JSON.stringify(json));
+          console.log('[DB] Base centralizada dados-pacientes.json carregada com sucesso!');
+          renderAcsSelectors();
+          updateCurrentAcsView();
+          return;
+        }
+      }
     } catch (e) {
-      return {};
+      console.warn('[DB] Fetch de dados-pacientes.json falhou, usando cache local:', e);
+    }
+
+    // 2. Se falhar o fetch, ler do cache localStorage
+    try {
+      const storedAcs = localStorage.getItem('ubs_acs_list_custom');
+      if (storedAcs) {
+        state.acsList = JSON.parse(storedAcs);
+      }
+      const local = localStorage.getItem(STORAGE_KEYS.PATIENTS_DB);
+      if (local) {
+        state.allPatientsDb = JSON.parse(local);
+        if (Array.isArray(state.allPatientsDb._acs_list)) {
+          state.acsList = state.allPatientsDb._acs_list;
+        }
+        renderAcsSelectors();
+        updateCurrentAcsView();
+        return;
+      }
+    } catch (e) {
+      console.warn('[DB] Erro ao ler local storage:', e);
+    }
+
+    // 3. Fallback: inicializar com estrutura padrão
+    state.allPatientsDb = {
+      _acs_list: [...state.acsList],
+      acs_1: [],
+      acs_2: [],
+      acs_3: [],
+      acs_4: [],
+      acs_5: [],
+      acs_6: [],
+      acs_7: [],
+      acs_8: []
+    };
+    renderAcsSelectors();
+    updateCurrentAcsView();
+  }
+
+  function renderAcsSelectors() {
+    const mainSelect = document.getElementById('selectAcsMain');
+    const adminSelect = document.getElementById('adminSelectAcs');
+
+    const curVal = state.currentAcsId;
+
+    if (mainSelect) {
+      mainSelect.innerHTML = '';
+      state.acsList.forEach(acs => {
+        const opt = document.createElement('option');
+        opt.value = acs.id;
+        opt.textContent = `${acs.name} (Microárea ${acs.microarea})`;
+        mainSelect.appendChild(opt);
+      });
+      mainSelect.value = curVal || 'acs_1';
+    }
+
+    if (adminSelect) {
+      adminSelect.innerHTML = '';
+      state.acsList.forEach(acs => {
+        const opt = document.createElement('option');
+        opt.value = acs.id;
+        opt.textContent = `${acs.name} (Microárea ${acs.microarea})`;
+        adminSelect.appendChild(opt);
+      });
+      adminSelect.value = curVal || 'acs_1';
     }
   }
 
-  function saveDb(db) {
-    localStorage.setItem(STORAGE_KEYS.PATIENTS_DB, JSON.stringify(db));
-  }
+  function updateCurrentAcsView() {
+    const acsId = state.currentAcsId;
+    const list = state.allPatientsDb[acsId] || [];
+    state.currentPatients = list;
 
-  function loadPatientsForCurrentAcs() {
-    const db = getDb();
-    let list = db[state.currentAcsId] || [];
-
-    // Se for o Mateus e ainda não tiver dados no localStorage, carregar os 267 reais do CSV inicial
-    if (list.length === 0 && state.currentAcsId === 'acs_1' && window.SAMPLE_INITIAL_DATA && window.SAMPLE_INITIAL_DATA.patients) {
-      list = window.SAMPLE_INITIAL_DATA.patients.map(p => ({
-        ...p,
-        acsId: 'acs_1',
-        acsName: 'Mateus Frota Mesquita'
-      }));
-      db['acs_1'] = list;
-      saveDb(db);
-    }
-
-    state.patients = list;
-
-    const countBadge = document.getElementById('acsPatientsCountBadge');
-    if (countBadge) {
-      countBadge.textContent = `${list.length} paciente(s)`;
+    const badge = document.getElementById('acsPatientsCountBadge');
+    if (badge) {
+      badge.textContent = `${list.length} pessoa(s) nesta área`;
     }
 
     if (list.length > 0) {
       selectPatient(list[0]);
     } else {
-      const curAcs = state.acsList.find(a => a.id === state.currentAcsId);
+      const curAcs = state.acsList.find(a => a.id === acsId);
       state.selectedPatient = {
         nome: 'NENHUM PACIENTE CADASTRADO',
         dn: '--/--/----',
@@ -140,21 +259,24 @@
         local: `Microárea ${curAcs ? curAcs.microarea : ''} - Olho d'Água das Cunhãs - MA`,
         acsName: curAcs ? curAcs.name : 'ACS'
       };
-      updatePatientView();
+      updatePatientCard();
+      updateMessagePreview();
     }
   }
 
-  // Seleção e Exibição do Paciente
+  // ==========================================
+  // 3. SELEÇÃO E EXIBIÇÃO DE PACIENTES
+  // ==========================================
   function selectPatient(patient) {
     state.selectedPatient = patient;
-    updatePatientView();
+    updatePatientCard();
     updateMessagePreview();
 
     const dropdown = document.getElementById('searchDropdown');
     if (dropdown) dropdown.style.display = 'none';
   }
 
-  function updatePatientView() {
+  function updatePatientCard() {
     const p = state.selectedPatient;
     if (!p) return;
     const curAcs = state.acsList.find(a => a.id === state.currentAcsId);
@@ -166,7 +288,9 @@
     document.getElementById('valLocal').textContent = p.local || '';
   }
 
-  // Mensagem e WhatsApp
+  // ==========================================
+  // 4. MENSAGEM DO WHATSAPP
+  // ==========================================
   function getMessageText() {
     const p = state.selectedPatient;
     const curAcs = state.acsList.find(a => a.id === state.currentAcsId);
@@ -200,24 +324,36 @@ Atendimento (Dia e hora): ${diaHora}`;
     }
   }
 
-  // Inicialização dos Agentes de Saúde
-  function initAcs() {
+  // ==========================================
+  // 5. INICIALIZAÇÃO DOS COMPONENTES
+  // ==========================================
+  function initApp() {
+    initAcsSelector();
+    initServiceButtons();
+    initPatientSearch();
+    initDateTimePickers();
+    initWhatsAppActions();
+    initAdminModal();
+    setupLogout();
+
+    loadCentralDatabase();
+  }
+
+  function initAcsSelector() {
     const select = document.getElementById('selectAcsMain');
     if (!select) return;
 
     select.addEventListener('change', function () {
       state.currentAcsId = this.value;
-      loadPatientsForCurrentAcs();
+      updateCurrentAcsView();
       const acs = state.acsList.find(a => a.id === state.currentAcsId);
-      showToast(`Agente selecionado: ${acs ? acs.name : ''}`, 'info');
+      showToast(`Área selecionada: ${acs ? acs.name : ''}`, 'info');
     });
 
     state.currentAcsId = select.value || 'acs_1';
-    loadPatientsForCurrentAcs();
   }
 
-  // Especialidades (Ordem exata: Dentista, Nutricionista, Psicóloga, Médico, Enfermagem, Preventivo, Psiquiatra)
-  function initServices() {
+  function initServiceButtons() {
     const buttons = document.querySelectorAll('#servicesGrid .service-card-btn');
     buttons.forEach(btn => {
       btn.addEventListener('click', function () {
@@ -229,9 +365,8 @@ Atendimento (Dia e hora): ${diaHora}`;
     });
   }
 
-  // Busca de Pacientes
   let searchTimer = null;
-  function initSearch() {
+  function initPatientSearch() {
     const input = document.getElementById('inputSearchPatient');
     const clearBtn = document.getElementById('btnClearSearch');
     const dropdown = document.getElementById('searchDropdown');
@@ -245,7 +380,7 @@ Atendimento (Dia e hora): ${diaHora}`;
       clearTimeout(searchTimer);
       searchTimer = setTimeout(() => {
         performSearch(query);
-      }, 120);
+      }, 100);
     });
 
     clearBtn.addEventListener('click', () => {
@@ -261,9 +396,7 @@ Atendimento (Dia e hora): ${diaHora}`;
     });
 
     input.addEventListener('focus', function () {
-      if (this.value.trim()) {
-        performSearch(this.value.trim());
-      }
+      if (this.value.trim()) performSearch(this.value.trim());
     });
   }
 
@@ -279,7 +412,7 @@ Atendimento (Dia e hora): ${diaHora}`;
     const norm = normalizeSearchText(query);
     const digits = query.replace(/\D/g, '');
 
-    const filtered = state.patients.filter(p => {
+    const filtered = state.currentPatients.filter(p => {
       const matchNome = normalizeSearchText(p.nome).includes(norm);
       const matchLocal = normalizeSearchText(p.local).includes(norm);
       let matchCpf = false;
@@ -293,25 +426,15 @@ Atendimento (Dia e hora): ${diaHora}`;
 
     if (filtered.length === 0) {
       dropdown.innerHTML = `
-        <div style="padding: 0.75rem; text-align: center; font-size: 0.85rem; color: var(--text-muted);">
-          Nenhum paciente encontrado.
-          <div style="margin-top: 0.4rem;">
-            <button class="btn btn-outline btn-sm" id="btnQuickAdd">➕ Cadastrar agora</button>
-          </div>
+        <div style="padding: 1rem; text-align: center; font-size: 0.9rem; color: var(--text-muted);">
+          Nenhum paciente encontrado com esse nome nesta área.
         </div>
       `;
       dropdown.style.display = 'block';
-      const qAdd = document.getElementById('btnQuickAdd');
-      if (qAdd) {
-        qAdd.addEventListener('click', () => {
-          dropdown.style.display = 'none';
-          openPatientModal(query);
-        });
-      }
       return;
     }
 
-    filtered.slice(0, 25).forEach(p => {
+    filtered.slice(0, 30).forEach(p => {
       const row = document.createElement('div');
       row.className = 'search-row';
       row.innerHTML = `
@@ -322,7 +445,7 @@ Atendimento (Dia e hora): ${diaHora}`;
       `;
       row.addEventListener('click', () => {
         selectPatient(p);
-        showToast(`Paciente: ${p.nome}`, 'success');
+        showToast(`Selecionado: ${p.nome}`, 'success');
       });
       dropdown.appendChild(row);
     });
@@ -330,8 +453,7 @@ Atendimento (Dia e hora): ${diaHora}`;
     dropdown.style.display = 'block';
   }
 
-  // Data e Horário
-  function initDateTime() {
+  function initDateTimePickers() {
     const dateInput = document.getElementById('inputDate');
     const shiftBtns = document.querySelectorAll('.shift-buttons-group .shift-btn');
 
@@ -354,18 +476,16 @@ Atendimento (Dia e hora): ${diaHora}`;
     });
   }
 
-  // Disparo do WhatsApp
-  function initWhatsApp() {
+  function initWhatsAppActions() {
     const btnSend = document.getElementById('btnSendWhatsApp');
     const btnCopy = document.getElementById('btnCopyMessage');
 
     if (btnSend) {
       btnSend.addEventListener('click', () => {
         const msg = getMessageText();
-        // Link que abre a tela de seleção de grupos no WhatsApp
         const url = `https://api.whatsapp.com/send?text=${encodeURIComponent(msg)}`;
         window.open(url, '_blank');
-        showToast('WhatsApp aberto! Selecione o grupo da equipe.', 'success');
+        showToast('WhatsApp aberto! Escolha o grupo desejado.', 'success');
       });
     }
 
@@ -374,7 +494,7 @@ Atendimento (Dia e hora): ${diaHora}`;
         const msg = getMessageText();
         if (navigator.clipboard && navigator.clipboard.writeText) {
           navigator.clipboard.writeText(msg).then(() => {
-            showToast('Mensagem copiada para a área de transferência!', 'success');
+            showToast('Mensagem copiada com sucesso!', 'success');
           }).catch(() => fallbackCopy(msg));
         } else {
           fallbackCopy(msg);
@@ -390,90 +510,214 @@ Atendimento (Dia e hora): ${diaHora}`;
     ta.select();
     document.execCommand('copy');
     document.body.removeChild(ta);
-    showToast('Mensagem copiada com sucesso!', 'success');
+    showToast('Mensagem copiada!', 'success');
   }
 
-  // Modal de Upload de CSV com Senha 12345 e Substituição sem Duplicatas
-  function initCsvUploadModal() {
-    const btnOpen = document.getElementById('btnOpenCsvUpload');
-    const modal = document.getElementById('modalCsvUpload');
-    const btnClose = document.getElementById('btnCloseCsvModal');
-    const btnCancel = document.getElementById('btnCancelCsv');
-    const btnConfirm = document.getElementById('btnConfirmCsv');
-    const inputPass = document.getElementById('inputCsvPassword');
-    const passError = document.getElementById('passwordErrorMsg');
-    const fileInput = document.getElementById('fileCsvInput');
-    const statusBox = document.getElementById('csvStatusBox');
-    const lblName = document.getElementById('lblCsvName');
-    const lblCount = document.getElementById('lblCsvCount');
+  // ==========================================
+  // 6. PAINEL DO ADMINISTRADOR (RENOMEAR ACS E UPLOAD DE CSVs)
+  // ==========================================
+  function initAdminModal() {
+    const btnOpen = document.getElementById('btnOpenAdminPanel');
+    const modal = document.getElementById('modalAdmin');
+    const btnClose = document.getElementById('btnCloseAdminModal');
+    const btnCancel = document.getElementById('btnCancelAdmin');
+    const btnSave = document.getElementById('btnSaveAdminCsv');
+    const selectAcs = document.getElementById('adminSelectAcs');
+    const fileInput = document.getElementById('adminCsvFileInput');
+    const previewBox = document.getElementById('adminCsvPreviewBox');
+    const lblFileName = document.getElementById('adminLblFileName');
+    const lblCount = document.getElementById('adminLblCount');
+    const lblMeta = document.getElementById('adminLblMeta');
+    const btnDownload = document.getElementById('btnDownloadJsonBackup');
 
-    if (btnOpen) {
-      btnOpen.addEventListener('click', () => {
-        inputPass.value = '';
-        passError.style.display = 'none';
-        fileInput.value = '';
-        statusBox.style.display = 'none';
-        btnConfirm.disabled = true;
-        state.stagedCsvPatients = [];
-        modal.classList.add('active');
+    // Abas
+    const tabBtnRename = document.getElementById('tabBtnRenameAcs');
+    const tabBtnUpload = document.getElementById('tabBtnUploadCsv');
+    const tabContentRename = document.getElementById('tabContentRenameAcs');
+    const tabContentUpload = document.getElementById('tabContentUploadCsv');
+    const adminAcsListInputs = document.getElementById('adminAcsListInputs');
+    const btnSaveAcsNames = document.getElementById('btnSaveAcsNames');
+
+    function switchTab(tab) {
+      if (tab === 'rename') {
+        tabBtnRename.className = 'btn btn-sm btn-primary';
+        tabBtnUpload.className = 'btn btn-sm btn-outline';
+        tabContentRename.style.display = 'block';
+        tabContentUpload.style.display = 'none';
+        renderAdminAcsInputs();
+      } else {
+        tabBtnRename.className = 'btn btn-sm btn-outline';
+        tabBtnUpload.className = 'btn btn-sm btn-primary';
+        tabContentRename.style.display = 'none';
+        tabContentUpload.style.display = 'block';
+        renderAcsSelectors();
+      }
+    }
+
+    if (tabBtnRename) tabBtnRename.addEventListener('click', () => switchTab('rename'));
+    if (tabBtnUpload) tabBtnUpload.addEventListener('click', () => switchTab('upload'));
+
+    function renderAdminAcsInputs() {
+      if (!adminAcsListInputs) return;
+      adminAcsListInputs.innerHTML = '';
+
+      state.acsList.forEach((acs, idx) => {
+        const row = document.createElement('div');
+        row.style.display = 'grid';
+        row.style.gridTemplateColumns = '32px 1fr 110px';
+        row.style.gap = '0.45rem';
+        row.style.alignItems = 'center';
+        row.style.background = '#f8fafc';
+        row.style.padding = '0.4rem 0.65rem';
+        row.style.borderRadius = 'var(--radius-sm)';
+        row.style.border = '1px solid #e2e8f0';
+
+        row.innerHTML = `
+          <strong style="color: var(--text-muted); font-size: 0.85rem;">#${idx + 1}</strong>
+          <input type="text" class="form-control admin-acs-name" data-acs-id="${acs.id}" value="${escapeHtml(acs.name)}" placeholder="Nome completo do agente" style="min-height: 38px; font-size: 0.875rem;">
+          <input type="text" class="form-control admin-acs-micro" data-acs-id="${acs.id}" value="${escapeHtml(acs.microarea)}" placeholder="Microárea" style="min-height: 38px; font-size: 0.875rem;">
+        `;
+        adminAcsListInputs.appendChild(row);
       });
+    }
+
+    if (btnSaveAcsNames) {
+      btnSaveAcsNames.addEventListener('click', async () => {
+        const nameInputs = document.querySelectorAll('.admin-acs-name');
+        const microInputs = document.querySelectorAll('.admin-acs-micro');
+
+        nameInputs.forEach(input => {
+          const id = input.getAttribute('data-acs-id');
+          const acs = state.acsList.find(a => a.id === id);
+          if (acs) {
+            acs.name = input.value.trim() || acs.name;
+          }
+        });
+
+        microInputs.forEach(input => {
+          const id = input.getAttribute('data-acs-id');
+          const acs = state.acsList.find(a => a.id === id);
+          if (acs) {
+            acs.microarea = input.value.trim() || acs.microarea;
+          }
+        });
+
+        // 1. Salvar no cache local
+        localStorage.setItem('ubs_acs_list_custom', JSON.stringify(state.acsList));
+        state.allPatientsDb._acs_list = state.acsList;
+        localStorage.setItem(STORAGE_KEYS.PATIENTS_DB, JSON.stringify(state.allPatientsDb));
+
+        // 2. Salvar no arquivo dados-pacientes.json no disco
+        try {
+          await fetch('/api/save-patients', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(state.allPatientsDb)
+          });
+        } catch (e) {
+          console.warn('[API] Falha ao salvar no disco:', e);
+        }
+
+        renderAcsSelectors();
+        updateCurrentAcsView();
+        showToast('Nomes dos 8 agentes atualizados com sucesso!', 'success');
+      });
+    }
+
+    function openModal() {
+      const pwd = prompt('Digite a senha de administrador:');
+      if (pwd !== GLOBAL_PASSWORD) {
+        alert('Senha incorreta! Acesso não autorizado.');
+        return;
+      }
+      fileInput.value = '';
+      previewBox.style.display = 'none';
+      btnSave.disabled = true;
+      state.adminStagedPatients = [];
+      switchTab('rename');
+      modal.classList.add('active');
     }
 
     function closeModal() {
       modal.classList.remove('active');
     }
 
+    if (btnOpen) btnOpen.addEventListener('click', openModal);
     if (btnClose) btnClose.addEventListener('click', closeModal);
     if (btnCancel) btnCancel.addEventListener('click', closeModal);
 
     fileInput.addEventListener('change', function () {
       if (!this.files || this.files.length === 0) return;
       const file = this.files[0];
-      lblName.textContent = file.name;
+      lblFileName.textContent = file.name;
 
       const reader = new FileReader();
       reader.onload = function (e) {
         const text = e.target.result;
         const parsed = parseCsv(text);
-        state.stagedCsvPatients = parsed;
+        state.adminStagedPatients = parsed;
         lblCount.textContent = parsed.length;
-        statusBox.style.display = 'block';
-        btnConfirm.disabled = parsed.length === 0;
+        lblMeta.textContent = '✓ Pronto para substituir a base anterior com segurança sem duplicações.';
+        previewBox.style.display = 'block';
+        btnSave.disabled = parsed.length === 0;
       };
       // e-SUS usa ISO-8859-1 (Latin1)
       reader.readAsText(file, 'ISO-8859-1');
     });
 
-    btnConfirm.addEventListener('click', () => {
-      // Validar Senha 12345
-      if (inputPass.value.trim() !== CSV_UPLOAD_PASSWORD) {
-        passError.style.display = 'block';
-        showToast('Senha de autorização incorreta!', 'error');
-        return;
-      }
-      passError.style.display = 'none';
-
-      if (state.stagedCsvPatients.length === 0) {
-        showToast('Nenhum paciente para importar!', 'error');
-        return;
-      }
-
-      // Substituir completamente a lista antiga daquele ACS (evitando duplicação!)
-      const db = getDb();
-      const curAcs = state.acsList.find(a => a.id === state.currentAcsId);
+    btnSave.addEventListener('click', async () => {
+      const targetAcsId = selectAcs.value;
+      const curAcs = state.acsList.find(a => a.id === targetAcsId);
       const acsName = curAcs ? curAcs.name : 'ACS';
 
-      db[state.currentAcsId] = state.stagedCsvPatients.map(p => ({
+      if (state.adminStagedPatients.length === 0) {
+        alert('Nenhum paciente encontrado para salvar.');
+        return;
+      }
+
+      // 1. Substituir a lista anterior daquele ACS na base centralizada
+      state.allPatientsDb[targetAcsId] = state.adminStagedPatients.map(p => ({
         ...p,
-        acsId: state.currentAcsId,
+        acsId: targetAcsId,
         acsName: acsName
       }));
+      state.allPatientsDb._acs_list = state.acsList;
 
-      saveDb(db);
+      // 2. Salvar no localStorage local
+      localStorage.setItem(STORAGE_KEYS.PATIENTS_DB, JSON.stringify(state.allPatientsDb));
+
+      // 3. Salvar no servidor local (atualizando dados-pacientes.json no disco)
+      try {
+        const saveResp = await fetch('/api/save-patients', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(state.allPatientsDb)
+        });
+        if (saveResp.ok) {
+          console.log('[API] Arquivo dados-pacientes.json salvo no disco!');
+        }
+      } catch (e) {
+        console.warn('[API] Servidor local offline ou rodando no GitHub Pages:', e);
+      }
+
       closeModal();
-      loadPatientsForCurrentAcs();
-      showToast(`Base atualizada! ${state.stagedCsvPatients.length} pacientes substituídos com sucesso para ${acsName}.`, 'success');
+      updateCurrentAcsView();
+      showToast(`Base atualizada! ${state.adminStagedPatients.length} pacientes salvos para ${acsName}.`, 'success');
     });
+
+    if (btnDownload) {
+      btnDownload.addEventListener('click', () => {
+        state.allPatientsDb._acs_list = state.acsList;
+        const blob = new Blob([JSON.stringify(state.allPatientsDb, null, 2)], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = 'dados-pacientes.json';
+        a.click();
+        URL.revokeObjectURL(url);
+        showToast('Arquivo dados-pacientes.json baixado!', 'success');
+      });
+    }
   }
 
   // Parser de CSV do e-SUS
@@ -528,126 +772,14 @@ Atendimento (Dia e hora): ${diaHora}`;
     return patients;
   }
 
-  // Modal de Cadastro Individual de Cidadão
-  function initPatientModal() {
-    const btnOpen = document.getElementById('btnOpenNewPatient');
-    const btnEdit = document.getElementById('btnEditCurrentPatient');
-    const modal = document.getElementById('modalPatientForm');
-    const btnClose = document.getElementById('btnClosePatientModal');
-    const btnCancel = document.getElementById('btnCancelPatient');
-    const btnSave = document.getElementById('btnSavePatient');
-
-    function closeModal() {
-      modal.classList.remove('active');
-    }
-
-    if (btnOpen) btnOpen.addEventListener('click', () => openPatientModal());
-    if (btnEdit) {
-      btnEdit.addEventListener('click', () => {
-        if (state.selectedPatient) openPatientModal('', state.selectedPatient);
-      });
-    }
-    if (btnClose) btnClose.addEventListener('click', closeModal);
-    if (btnCancel) btnCancel.addEventListener('click', closeModal);
-
-    if (btnSave) {
-      btnSave.addEventListener('click', () => {
-        const editId = document.getElementById('editPatientId').value;
-        const nome = document.getElementById('formNome').value.trim().toUpperCase();
-        const dn = document.getElementById('formDN').value.trim();
-        const cpfRaw = document.getElementById('formCPF').value.trim();
-        const tipoLogr = document.getElementById('formTipoLogr').value;
-        const logradouro = document.getElementById('formLogradouro').value.trim();
-        const numero = document.getElementById('formNumero').value.trim() || 'S/N';
-        const bairro = document.getElementById('formBairro').value.trim() || 'Centro';
-        const municipio = "Olho d'Água das Cunhãs - MA";
-
-        if (!nome || !dn || !logradouro) {
-          showToast('Preencha os campos obrigatórios (*)', 'error');
-          return;
-        }
-
-        const local = `${tipoLogr} ${logradouro}, Nº ${numero} - ${bairro} - ${municipio}`;
-        const curAcs = state.acsList.find(a => a.id === state.currentAcsId);
-
-        const newP = {
-          id: editId || ('p_' + Date.now()),
-          nome: nome,
-          dn: dn,
-          cpf: formatCPF(cpfRaw),
-          cpf_raw: cpfRaw,
-          tipo_logradouro: tipoLogr,
-          logradouro: logradouro,
-          numero: numero,
-          bairro: bairro,
-          local: local,
-          acsId: state.currentAcsId,
-          acsName: curAcs ? curAcs.name : 'ACS'
-        };
-
-        const db = getDb();
-        if (!db[state.currentAcsId]) db[state.currentAcsId] = [];
-
-        if (editId) {
-          const idx = db[state.currentAcsId].findIndex(p => p.id === editId);
-          if (idx !== -1) db[state.currentAcsId][idx] = newP;
-        } else {
-          db[state.currentAcsId].unshift(newP);
-        }
-
-        saveDb(db);
-        closeModal();
-        loadPatientsForCurrentAcs();
-        selectPatient(newP);
-        showToast('Cidadão salvo com sucesso!', 'success');
-      });
-    }
-  }
-
-  function openPatientModal(initialName = '', existingPatient = null) {
-    const modal = document.getElementById('modalPatientForm');
-    const title = document.getElementById('lblPatientModalTitle');
-
-    if (existingPatient && existingPatient.id) {
-      title.textContent = '✏️ Editar Cidadão';
-      document.getElementById('editPatientId').value = existingPatient.id;
-      document.getElementById('formNome').value = existingPatient.nome || '';
-      document.getElementById('formDN').value = existingPatient.dn || '';
-      document.getElementById('formCPF').value = existingPatient.cpf_raw || existingPatient.cpf || '';
-      document.getElementById('formTipoLogr').value = existingPatient.tipo_logradouro || 'Rua';
-      document.getElementById('formLogradouro').value = existingPatient.logradouro || '';
-      document.getElementById('formNumero').value = existingPatient.numero || 'S/N';
-      document.getElementById('formBairro').value = existingPatient.bairro || 'Centro';
-    } else {
-      title.textContent = '➕ Cadastrar Cidadão';
-      document.getElementById('editPatientId').value = '';
-      document.getElementById('formNome').value = initialName || '';
-      document.getElementById('formDN').value = '';
-      document.getElementById('formCPF').value = '';
-      document.getElementById('formTipoLogr').value = 'Rua';
-      document.getElementById('formLogradouro').value = '';
-      document.getElementById('formNumero').value = '';
-      document.getElementById('formBairro').value = 'Centro';
-    }
-
-    modal.classList.add('active');
-  }
-
   function escapeHtml(str) {
     if (!str) return '';
     return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
   }
 
-  // Inicialização
+  // Inicialização do fluxo de login
   document.addEventListener('DOMContentLoaded', () => {
-    initAcs();
-    initServices();
-    initSearch();
-    initDateTime();
-    initWhatsApp();
-    initCsvUploadModal();
-    initPatientModal();
-    updateMessagePreview();
+    checkAuth();
   });
 
 })();

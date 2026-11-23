@@ -18,6 +18,40 @@ const MIME_TYPES = {
 };
 
 const server = http.createServer((req, res) => {
+  // CORS
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+
+  if (req.method === 'OPTIONS') {
+    res.writeHead(204);
+    return res.end();
+  }
+
+  // API Endpoint para salvar a base de pacientes no disco
+  if (req.method === 'POST' && req.url === '/api/save-patients') {
+    let body = '';
+    req.on('data', chunk => {
+      body += chunk.toString();
+    });
+    req.on('end', () => {
+      try {
+        const parsed = JSON.parse(body);
+        const filePath = path.join(BASE_DIR, 'dados-pacientes.json');
+        fs.writeFileSync(filePath, JSON.stringify(parsed, null, 2), 'utf-8');
+        console.log(`[API] dados-pacientes.json atualizado com sucesso no disco!`);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: true, message: 'Base de dados salva no arquivo dados-pacientes.json com sucesso!' }));
+      } catch (err) {
+        console.error(`[API] Erro ao salvar dados-pacientes.json:`, err);
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: false, error: err.message }));
+      }
+    });
+    return;
+  }
+
+  // Servir arquivos estáticos
   let reqPath = decodeURI(req.url.split('?')[0]);
   if (reqPath === '/' || reqPath === '') {
     reqPath = '/index.html';
@@ -42,8 +76,7 @@ const server = http.createServer((req, res) => {
 
     res.writeHead(200, {
       'Content-Type': contentType,
-      'Cache-Control': 'no-cache, no-store, must-revalidate',
-      'Access-Control-Allow-Origin': '*'
+      'Cache-Control': 'no-cache, no-store, must-revalidate'
     });
 
     const stream = fs.createReadStream(filePath);
